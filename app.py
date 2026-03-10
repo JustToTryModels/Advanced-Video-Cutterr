@@ -93,7 +93,7 @@ def sync_state(key_from, key_to):
     """Synchronizes slider and number input states"""
     st.session_state[key_to] = st.session_state[key_from]
 
-def render_synced_slider_number(label, min_v, max_v, default_v, step_v, base_key, is_int=False, master_disable=False):
+def render_synced_slider_number(label, min_v, max_v, default_v, step_v, base_key, is_int=False):
     """Renders a slider with a perfectly synced manual number input and a lock toggle next to it"""
     sl_key = f"{base_key}_sl"
     num_key = f"{base_key}_num"
@@ -107,8 +107,8 @@ def render_synced_slider_number(label, min_v, max_v, default_v, step_v, base_key
     if st.session_state[sl_key] < min_v: st.session_state[sl_key] = min_v
     st.session_state[num_key] = st.session_state[sl_key]
 
-    # Check lock state (If master toggle is ON, or individual toggle is ON)
-    is_locked = st.session_state.get(lock_key, False) or master_disable
+    # Check lock state
+    is_locked = st.session_state.get(lock_key, False)
 
     col1, col2, col3 = st.columns([6, 2, 1.2]) # Added extra column for the lock toggle
     with col1:
@@ -121,9 +121,9 @@ def render_synced_slider_number(label, min_v, max_v, default_v, step_v, base_key
         else:
             st.number_input(label, min_value=float(min_v), max_value=float(max_v), step=float(step_v), key=num_key, on_change=sync_state, args=(num_key, sl_key), label_visibility="collapsed", disabled=is_locked)
     with col3:
-        # Align toggle with the manual number box. Also disable this toggle if master lock is on.
+        # Align toggle with the manual number box
         st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-        st.toggle("🔒", key=lock_key, disabled=master_disable)
+        st.toggle("🔒", key=lock_key)
         
     return st.session_state[sl_key]
 
@@ -264,14 +264,10 @@ if uploaded_file:
                 st.session_state.pany_num = 0
 
             st.markdown("---")
-            
-            # MASTER LOCK TOGGLE FOR ZOOM & PAN
-            master_layout_lock = st.toggle("🔒 Lock All Zoom & Pan Controls", key="master_layout_lock")
-            
-            # Using our custom synchronized inputs WITH individual locks AND master lock
-            zoom = render_synced_slider_number("🔍 Zoom (Scale)", 0.1, 5.0, float(fill_zoom), 0.05, "zoom", master_disable=master_layout_lock)
-            pan_x = render_synced_slider_number("↔️ Pan Horizontal (%)", -100, 100, 0, 1, "panx", is_int=True, master_disable=master_layout_lock)
-            pan_y = render_synced_slider_number("↕️ Pan Vertical (%)", -100, 100, 0, 1, "pany", is_int=True, master_disable=master_layout_lock)
+            # Using our custom synchronized inputs WITH locks
+            zoom = render_synced_slider_number("🔍 Zoom (Scale)", 0.1, 5.0, float(fill_zoom), 0.05, "zoom")
+            pan_x = render_synced_slider_number("↔️ Pan Horizontal (%)", -100, 100, 0, 1, "panx", is_int=True)
+            pan_y = render_synced_slider_number("↕️ Pan Vertical (%)", -100, 100, 0, 1, "pany", is_int=True)
             
             st.markdown("---")
             preview_time = render_synced_slider_number("Preview Frame Time", start_t, end_t, start_t, 0.1, "prev")
