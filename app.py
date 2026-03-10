@@ -1,255 +1,208 @@
 import streamlit as st
 import cv2
-import numpy as np
-import subprocess
-import tempfile
 import os
-import json
-from pathlib import Path
+import tempfile
+import subprocess
+from PIL import Image
 
-st.set_page_config(page_title="Pro Video Cutter & Reframer", layout="wide")
-st.title("🎬 Pro Video Cutter & Smart Reframer")
-st.markdown("**Trim • Change aspect ratio • Zoom & Pan • Maximum quality**")
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Pro Video Editor: Zoom & Pan", layout="wide")
+st.title("🎬 Pro Video Editor: Layout, Zoom & Pan")
+st.markdown("""
+Create perfect 9:16 Shorts or 16:9 Landscape videos. 
+* **Trim Only:** 100% Lossless stream copy.
+* **Layout/Zoom/Pan:** Re-encoded with visually lossless quality (CRF 17).
+""")
 
-# ========================= SESSION STATE =========================
-if "input_path" not in st.session_state:
-    st.session_state.input_path = None
-if "orig_w" not in st.session_state:
-    st.session_state.orig_w = None
-if "orig_h" not in st.session_state:
-    st.session_state.orig_h = None
-if "duration" not in st.session_state:
-    st.session_state.duration = None
-if "fps" not in st.session_state:
-    st.session_state.fps = None
-if "preview_frame" not in st.session_state:
-    st.session_state.preview_frame = None
-
-# ========================= HELPERS =========================
-def get_video_metadata(video_path: str):
-    cmd = [
-        'ffprobe', '-v', 'quiet', '-print_format', 'json',
-        '-show_format', '-show_streams', video_path
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    data = json.loads(result.stdout)
-
-    for stream in data['streams']:
-        if stream['codec_type'] == 'video':
-            return {
-                'width': int(stream['width']),
-                'height': int(stream['height']),
-                'duration': float(data['format']['duration']),
-                'fps': eval(stream.get('r_frame_rate', '30/1'))
-            }
-    return None
-
-
-def extract_preview_frame(video_path: str, time_sec: float):
+# --- HELPER FUNCTIONS ---
+def get_video_info(video_path):
     cap = cv2.VideoCapture(video_path)
-    cap.set(cv2.CAP_PROP_POS_MSEC, time_sec * 1000)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = frame_count / fps if fps > 0 else 0
+    cap.release()
+    return width, height, fps, duration
+
+def extract_frame(video_path, time_in_seconds):
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_MSEC, time_in_seconds * 1000)
     ret, frame = cap.read()
     cap.release()
     if ret:
-        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     return None
 
+def make_even(val):
+    """FFmpeg requires dimensions to be divisible by 2"""
+    val = int(val)
+    return val if val % 2 == 0 else val + 1
 
-def calculate_crop_params(orig_w, orig_h, target_ratio, zoom, h_shift, v_shift):
-    # Base crop (maximum area with target aspect ratio)
-    if orig_w / orig_h > target_ratio:
-        base_h = orig_h
-        base_w = int(base_h * target_ratio)
+def generate_preview(frame_img, w_out, h_out, zoom, pan_x_pct, pan_y_pct):
+    """Generates a live WYSIWYG preview of the Zoom & Pan layout"""
+    w_in, h_in = frame_img.size
+    
+    # Calculate scaled dimensions
+    w_s, h_s = int(w_in * zoom), int(h_in * zoom)
+    
+    # Scale image (using fast resampling for preview)
+    resized_img = frame_img.resize((w_s, h_s), Image.Resampling.LANCZOS)
+    
+    # Base center coordinates (centers the video on the canvas)
+    x_center = (w_out - w_s) // 2
+    y_center = (h_out - h_s) // 2
+    
+    # Apply Pan (Percentage based offset)
+    # 100% pan means moving it by half its width
+    x_final = int(x_center + (pan_x_pct / 100.0) * (w_s / 2))
+    y_final = int(y_center + (pan_y_pct / 100.0) * (h_s / 2))
+    
+    # Create black canvas and paste the video frame onto it
+    canvas = Image.new("RGB", (w_out, h_out), (0, 0, 0))
+    canvas.paste(resized_img, (x_final, y_final))
+    
+    return canvas, w_s, h_s, x_final, y_final
+
+def process_video(input_path, output_path, start_t, end_t, layout_data=None):
+    if layout_data is None:
+        st.info("No Layout applied. Performing Lossless Trim...")
+        cmd = [
+            "ffmpeg", "-y", 
+            "-ss", str(start_t), 
+            "-to", str(end_t), 
+            "-i", input_path,
+            "-c", "copy", 
+            output_path
+        ]
     else:
-        base_w = orig_w
-        base_h = int(base_w / target_ratio)
+        st.info("Layout/Zoom/Pan applied. Rendering visually lossless (CRF 17)...")
+        w_out, h_out = make_even(layout_data['w_out']), make_even(layout_data['h_out'])
+        w_s, h_s = make_even(layout_data['w_s']), make_even(layout_data['h_s'])
+        x_f, y_f = layout_data['x_final'], layout_data['y_final']
+        
+        # FFmpeg Filter Graph:
+        # 1. Create black background canvas of specific size
+        # 2. Scale the input video by the zoom factor
+        # 3. Overlay the scaled video onto the black background at X,Y pan coordinates
+        filter_complex = f"color=c=black:s={w_out}x{h_out} [bg]; [0:v] scale={w_s}:{h_s} [vid]; [bg][vid] overlay={x_f}:{y_f}:shortest=1"
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(start_t),
+            "-to", str(end_t),
+            "-i", input_path,
+            "-filter_complex", filter_complex,
+            "-c:v", "libx264",
+            "-crf", "17",        # Visually Lossless
+            "-preset", "slow",   # Best compression/quality ratio
+            "-c:a", "aac",
+            "-b:a", "192k",
+            output_path
+        ]
 
-    # Apply zoom
-    crop_w = int(base_w / zoom)
-    crop_h = int(base_h / zoom)
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except subprocess.CalledProcessError as e:
+        st.error(f"FFmpeg Error: {e.stderr.decode('utf-8')}")
+        return False
 
-    # Clamp
-    crop_w = min(crop_w, orig_w)
-    crop_h = min(crop_h, orig_h)
-
-    # Center + shift
-    max_offset_x = (orig_w - crop_w) / 2
-    max_offset_y = (orig_h - crop_h) / 2
-
-    offset_x = h_shift * max_offset_x
-    offset_y = v_shift * max_offset_y
-
-    crop_x = int((orig_w - crop_w) / 2 + offset_x)
-    crop_y = int((orig_h - crop_h) / 2 + offset_y)
-
-    return crop_x, crop_y, crop_w, crop_h
-
-
-# ========================= MAIN APP =========================
-uploaded_file = st.file_uploader("Upload video (MP4, MOV, AVI, MKV)", 
-                                type=['mp4', 'mov', 'avi', 'mkv', 'webm'])
+# --- MAIN APP ---
+uploaded_file = st.file_uploader("Upload Video (MP4, MOV, MKV)", type=["mp4", "mov", "mkv"])
 
 if uploaded_file:
-    # Save uploaded file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
-        tmp.write(uploaded_file.getbuffer())
-        st.session_state.input_path = tmp.name
+    temp_dir = tempfile.gettempdir()
+    input_path = os.path.join(temp_dir, f"in_{uploaded_file.name}")
+    output_path = os.path.join(temp_dir, f"out_{uploaded_file.name}")
+    
+    with open(input_path, "wb") as f:
+        f.write(uploaded_file.read())
 
-    # Get metadata
-    meta = get_video_metadata(st.session_state.input_path)
-    if meta:
-        st.session_state.orig_w = meta['width']
-        st.session_state.orig_h = meta['height']
-        st.session_state.duration = meta['duration']
-        st.session_state.fps = meta['fps']
+    orig_w, orig_h, fps, duration = get_video_info(input_path)
+    st.success(f"Loaded! Resolution: {orig_w}x{orig_h} | Duration: {duration:.2f}s")
 
-    st.success(f"Loaded: {st.session_state.orig_w}×{st.session_state.orig_h} | "
-               f"{st.session_state.duration:.1f}s | {st.session_state.fps:.2f} fps")
+    # --- TRIM CONTROLS ---
+    st.markdown("### 1. Trim Video")
+    start_t, end_t = st.slider("Select Start and End Time (Seconds)", 
+                               0.0, duration, (0.0, duration), step=0.1)
 
-    # Original video
-    st.video(st.session_state.input_path)
+    # --- LAYOUT & ZOOM/PAN CONTROLS ---
+    st.markdown("### 2. Layout, Zoom & Pan")
+    enable_layout = st.checkbox("Enable Layout Edits (Zoom/Pan/Aspect Ratio)", value=False)
+    
+    layout_data = None
+    
+    if enable_layout:
+        col_ui, col_preview = st.columns([1, 1.5])
+        
+        with col_ui:
+            # 1. Canvas Resolution
+            aspect_choice = st.selectbox("Target Layout (Canvas Size)", [
+                "9:16 (Shorts/Reels/TikTok) - 1080x1920",
+                "16:9 (YouTube) - 1920x1080",
+                "1:1 (Square) - 1080x1080",
+                "Keep Original Dimensions"
+            ])
+            
+            if "9:16" in aspect_choice:
+                w_out, h_out = 1080, 1920
+            elif "16:9" in aspect_choice:
+                w_out, h_out = 1920, 1080
+            elif "1:1" in aspect_choice:
+                w_out, h_out = 1080, 1080
+            else:
+                w_out, h_out = orig_w, orig_h
 
-    # ===================== CONTROLS =====================
-    col1, col2 = st.columns([1, 1])
+            # Calculate a "Fill" zoom default so the video covers the whole canvas initially
+            fill_zoom = max(w_out / orig_w, h_out / orig_h)
 
-    with col1:
-        st.subheader("1. Trim")
-        start_time = st.slider("Start Time (s)", 0.0, st.session_state.duration, 0.0, 0.01)
-        end_time = st.slider("End Time (s)", start_time, st.session_state.duration, 
-                            st.session_state.duration, 0.01)
+            st.markdown("---")
+            # 2. Zoom & Pan Sliders
+            zoom = st.slider("🔍 Zoom (Scale)", min_value=0.1, max_value=5.0, value=float(fill_zoom), step=0.05)
+            pan_x = st.slider("↔️ Pan Horizontal (%)", min_value=-100, max_value=100, value=0, step=1)
+            pan_y = st.slider("↕️ Pan Vertical (%)", min_value=-100, max_value=100, value=0, step=1)
+            
+            st.markdown("---")
+            preview_time = st.slider("Preview Frame Time", min_value=start_t, max_value=end_t, value=start_t, step=0.1)
+        
+        with col_preview:
+            frame_img = extract_frame(input_path, preview_time)
+            if frame_img:
+                # Generate live preview
+                preview_canvas, final_w_s, final_h_s, final_x, final_y = generate_preview(
+                    frame_img, w_out, h_out, zoom, pan_x, pan_y
+                )
+                
+                st.image(preview_canvas, caption=f"Live Preview ({w_out}x{h_out})", use_column_width=True)
+                
+                # Save math for FFmpeg
+                layout_data = {
+                    'w_out': w_out, 'h_out': h_out,
+                    'w_s': final_w_s, 'h_s': final_h_s,
+                    'x_final': final_x, 'y_final': final_y
+                }
 
-    with col2:
-        st.subheader("2. Output Aspect Ratio")
-        presets = {
-            "16:9 (Landscape)": 16/9,
-            "9:16 (Vertical/Reels)": 9/16,
-            "1:1 (Square)": 1.0,
-            "4:3": 4/3,
-            "21:9 (Ultrawide)": 21/9,
-            "9:21 (Vertical Ultrawide)": 9/21,
-            "3:4": 3/4,
-        }
+    # --- PROCESS ---
+    st.markdown("---")
+    if st.button("🚀 Process Video", use_container_width=True, type="primary"):
+        with st.spinner("Processing in background..."):
+            
+            success = process_video(input_path, output_path, start_t, end_t, layout_data)
 
-        preset_name = st.selectbox("Preset", list(presets.keys()))
-        target_ratio = presets[preset_name]
-
-        if st.checkbox("Custom Ratio"):
-            c1, c2 = st.columns(2)
-            with c1:
-                w = st.number_input("Width ratio", 1, 100, 16)
-            with c2:
-                h = st.number_input("Height ratio", 1, 100, 9)
-            target_ratio = w / h
-
-    # Output resolution
-    st.subheader("3. Output Resolution")
-    target_height = st.select_slider(
-        "Target Height",
-        options=[480, 720, 1080, 1440, 2160],
-        value=1080
-    )
-    target_width = int(target_height * target_ratio)
-    # Make dimensions even (required for many encoders)
-    target_width = target_width if target_width % 2 == 0 else target_width + 1
-    target_height = target_height if target_height % 2 == 0 else target_height + 1
-
-    st.info(f"**Output resolution:** {target_width}×{target_height}")
-
-    # ===================== FRAMING =====================
-    st.subheader("4. Zoom & Pan (Framing)")
-
-    zoom = st.slider("Zoom Level", min_value=1.0, max_value=6.0, value=1.0, step=0.05,
-                    help="1.0 = maximum area, higher = more zoom")
-
-    h_shift = st.slider("Horizontal Pan", -1.0, 1.0, 0.0, 0.01)
-    v_shift = st.slider("Vertical Pan", -1.0, 1.0, 0.0, 0.01)
-
-    # Calculate crop
-    crop_x, crop_y, crop_w, crop_h = calculate_crop_params(
-        st.session_state.orig_w, st.session_state.orig_h, target_ratio, zoom, h_shift, v_shift
-    )
-
-    # Preview frame (middle of trimmed section)
-    preview_time = (start_time + end_time) / 2
-
-    preview_frame = extract_preview_frame(st.session_state.input_path, preview_time)
-    if preview_frame is not None:
-        st.session_state.preview_frame = preview_frame
-
-    if st.session_state.preview_frame is not None:
-        frame = st.session_state.preview_frame.copy()
-
-        # Draw crop rectangle on original
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (crop_x, crop_y), (crop_x + crop_w, crop_y + crop_h), 
-                     (0, 255, 0), 6)
-
-        st.image(overlay, caption="Original frame with crop overlay", use_column_width=True)
-
-        # Apply crop + resize
-        cropped = frame[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w]
-        result = cv2.resize(cropped, (target_width, target_height), 
-                          interpolation=cv2.INTER_LANCZOS4)
-
-        st.image(result, caption="**FINAL OUTPUT PREVIEW**", use_column_width=True)
-
-    # ===================== PROCESS =====================
-    if st.button("🚀 Process Video (High Quality)", type="primary", use_container_width=True):
-        if not st.session_state.input_path:
-            st.error("No video loaded")
-            st.stop()
-
-        with st.spinner("Processing with maximum quality settings..."):
-            output_path = tempfile.mktemp(suffix=".mp4")
-
-            trim_duration = end_time - start_time
-
-            # High quality ffmpeg command
-            vf = f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={target_width}:{target_height}:flags=lanczos"
-
-            cmd = [
-                'ffmpeg', '-y',
-                '-ss', str(start_time),
-                '-i', st.session_state.input_path,
-                '-t', str(trim_duration),
-                '-vf', vf,
-                '-c:v', 'libx264',
-                '-crf', '17',           # Visually lossless
-                '-preset', 'slow',      # Best quality
-                '-tune', 'film',
-                '-c:a', 'aac',
-                '-b:a', '192k',
-                '-movflags', '+faststart',
-                output_path
-            ]
-
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                st.success("✅ Processing completed!")
-
-                with open(output_path, "rb") as f:
+            if success:
+                st.success("✅ Complete! Quality retained.")
+                with open(output_path, "rb") as file:
+                    video_bytes = file.read()
+                    st.video(video_bytes)
                     st.download_button(
-                        label="📥 Download Final Video",
-                        data=f,
-                        file_name="FINAL_VIDEO.mp4",
+                        label="⬇️ Download Output Video",
+                        data=video_bytes,
+                        file_name=f"edited_{uploaded_file.name}",
                         mime="video/mp4",
                         use_container_width=True
                     )
-
-            except subprocess.CalledProcessError as e:
-                st.error("FFmpeg error:")
-                st.code(e.stderr)
-
-            finally:
-                if os.path.exists(output_path):
-                    os.unlink(output_path)
-
-# Cleanup on session end
-def cleanup():
-    if st.session_state.input_path and os.path.exists(st.session_state.input_path):
-        try:
-            os.unlink(st.session_state.input_path)
-        except:
-            pass
-
-st.button("Clear & Upload New Video", on_click=cleanup)
+                try:
+                    os.remove(output_path)
+                except:
+                    pass
