@@ -96,6 +96,7 @@ def process_video(input_path, output_path, start_t, end_t, layout_data=None):
             "-c:v", "libx264",
             "-crf", "17",        # Visually Lossless
             "-preset", "slow",   # Best compression/quality ratio
+            "-pix_fmt", "yuv420p", # Ensures the video plays correctly in Streamlit/Web Browsers
             "-c:a", "aac",
             "-b:a", "192k",
             output_path
@@ -192,9 +193,17 @@ if uploaded_file:
 
             if success:
                 st.success("✅ Complete! Quality retained.")
+                
+                # --- PREVIEW SECTION ADDED HERE ---
+                st.markdown("### 🎬 Preview Final Video")
+                st.info("Watch your trimmed and zoomed video below before downloading.")
+                
                 with open(output_path, "rb") as file:
                     video_bytes = file.read()
-                    st.video(video_bytes)
+                    
+                    st.video(video_bytes) # Displays the video right in the browser
+                    
+                    st.markdown("---")
                     st.download_button(
                         label="⬇️ Download Output Video",
                         data=video_bytes,
