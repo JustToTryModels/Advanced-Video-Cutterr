@@ -1,17 +1,17 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import cv2
 import os
 import tempfile
 import subprocess
-from PIL import Image
+import base64
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Pro Video Editor: Zoom & Pan", layout="wide")
-st.title("🎬 Pro Video Editor: Layout, Zoom & Pan")
+st.set_page_config(page_title="Pro Video Editor", layout="wide")
+st.title("🎬 Interactive Pro Video Editor")
 st.markdown("""
-Create perfect 9:16 Shorts or 16:9 Landscape videos. 
-* **Trim Only:** 100% Lossless stream copy.
-* **Layout/Zoom/Pan:** Re-encoded with visually lossless quality (CRF 17).
+* **Pure Trimming:** 100% Mathematically Lossless (`-c copy`).
+* **Interactive Layout/Zoom:** Drag to Pan, Drag corners to Zoom! Uses visually lossless Re-encoding (`CRF-17`).
 """)
 
 # --- HELPER FUNCTIONS ---
@@ -25,67 +25,133 @@ def get_video_info(video_path):
     cap.release()
     return width, height, fps, duration
 
-def extract_frame(video_path, time_in_seconds):
+def extract_frame_base64(video_path, time_in_seconds):
+    """Extract a frame and convert to Base64 to send to our HTML5 Canvas UI"""
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_MSEC, time_in_seconds * 1000)
     ret, frame = cap.read()
     cap.release()
     if ret:
-        return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        # Encode as JPEG to keep UI fast
+        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return base64.b64encode(buffer).decode('utf-8')
     return None
 
 def make_even(val):
-    """FFmpeg requires dimensions to be divisible by 2"""
+    """FFmpeg requires output dimensions to be divisible by 2"""
     val = int(val)
     return val if val % 2 == 0 else val + 1
 
-def generate_preview(frame_img, w_out, h_out, zoom, pan_x_pct, pan_y_pct):
-    """Generates a live WYSIWYG preview of the Zoom & Pan layout"""
-    w_in, h_in = frame_img.size
-    
-    # Calculate scaled dimensions
-    w_s, h_s = int(w_in * zoom), int(h_in * zoom)
-    
-    # Scale image (using fast resampling for preview)
-    resized_img = frame_img.resize((w_s, h_s), Image.Resampling.LANCZOS)
-    
-    # Base center coordinates (centers the video on the canvas)
-    x_center = (w_out - w_s) // 2
-    y_center = (h_out - h_s) // 2
-    
-    # Apply Pan (Percentage based offset)
-    # 100% pan means moving it by half its width
-    x_final = int(x_center + (pan_x_pct / 100.0) * (w_s / 2))
-    y_final = int(y_center + (pan_y_pct / 100.0) * (h_s / 2))
-    
-    # Create black canvas and paste the video frame onto it
-    canvas = Image.new("RGB", (w_out, h_out), (0, 0, 0))
-    canvas.paste(resized_img, (x_final, y_final))
-    
-    return canvas, w_s, h_s, x_final, y_final
+# --- THE INTERACTIVE UI COMPONENT (Fabric.js) ---
+def st_interactive_canvas(b64_image, target_w, target_h, key):
+    """Injects a Fabric.js canvas allowing mobile-style Touch/Mouse Drag & Zoom"""
+    html_code = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <script src="https://cdn.jsdelivr.net/npm/streamlit-component-lib@1.3.0/dist/streamlit.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
+        <style>
+            body {{ margin: 0; display: flex; justify-content: center; align-items: center; background: #1E1E1E; padding: 20px; touch-action: none; }}
+            .canvas-container {{ box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 2px solid #333; }}
+        </style>
+    </head>
+    <body>
+        <canvas id="c"></canvas>
+        <script>
+            function init() {{
+                Streamlit.setComponentReady();
+                
+                const targetW = {target_w};
+                const targetH = {target_h};
+                
+                // Scale down the UI workspace so it fits nicely on screen
+                const maxUIHeight = 500;
+                const uiScale = Math.min(maxUIHeight / targetH, window.innerWidth * 0.8 / targetW);
+                
+                const canvas = new fabric.Canvas('c', {{
+                    width: targetW * uiScale,
+                    height: targetH * uiScale,
+                    backgroundColor: '#000000'
+                }});
 
-def process_video(input_path, output_path, start_t, end_t, layout_data=None):
+                Streamlit.setFrameHeight(maxUIHeight + 40);
+
+                fabric.Image.fromURL('data:image/jpeg;base64,{b64_image}', function(img) {{
+                    // Auto-fill canvas initially
+                    const scaleX = targetW / img.width;
+                    const scaleY = targetH / img.height;
+                    const initialScale = Math.max(scaleX, scaleY) * uiScale;
+
+                    img.set({{
+                        left: (canvas.width - img.width * initialScale) / 2,
+                        top: (canvas.height - img.height * initialScale) / 2,
+                        scaleX: initialScale,
+                        scaleY: initialScale,
+                        borderColor: '#FF4B4B',
+                        cornerColor: '#FF4B4B',
+                        cornerSize: 15,
+                        transparentCorners: false
+                    }});
+                    
+                    img.setControlsVisibility({{ mtr: false }}); // Disable rotation
+                    
+                    canvas.add(img);
+                    canvas.setActiveObject(img);
+
+                    function sendData() {{
+                        // Send TRUE math back to Streamlit (ignoring the UI scale down)
+                        const data = {{
+                            scale: img.scaleX / uiScale,
+                            left: img.left / uiScale,
+                            top: img.top / uiScale
+                        }};
+                        Streamlit.setComponentValue(data);
+                    }}
+
+                    canvas.on('object:modified', sendData);
+                    sendData(); // Send initial state immediately
+                }});
+            }}
+            window.onload = init;
+        </script>
+    </body>
+    </html>
+    """
+    return components.html(html_code, height=560)
+
+
+def process_video(input_path, output_path, start_t, end_t, layout_data=None, orig_w=None, orig_h=None, target_w=None, target_h=None):
     if layout_data is None:
-        st.info("No Layout applied. Performing Lossless Trim...")
+        st.info("No Layout applied. Performing Lossless Trim (Instant & 0% Quality Loss)...")
         cmd = [
             "ffmpeg", "-y", 
             "-ss", str(start_t), 
             "-to", str(end_t), 
             "-i", input_path,
-            "-c", "copy", 
+            "-c", "copy", # 100% copy
             output_path
         ]
     else:
-        st.info("Layout/Zoom/Pan applied. Rendering visually lossless (CRF 17)...")
-        w_out, h_out = make_even(layout_data['w_out']), make_even(layout_data['h_out'])
-        w_s, h_s = make_even(layout_data['w_s']), make_even(layout_data['h_s'])
-        x_f, y_f = layout_data['x_final'], layout_data['y_final']
+        st.info("Layout Edited. Re-encoding with Visually Lossless Quality (CRF 17)...")
+        
+        # Extract Math from Javascript
+        scale = layout_data['scale']
+        x_offset = int(layout_data['left'])
+        y_offset = int(layout_data['top'])
+        
+        w_out = make_even(target_w)
+        h_out = make_even(target_h)
+        
+        # Scaled video dimensions
+        s_w = make_even(orig_w * scale)
+        s_h = make_even(orig_h * scale)
         
         # FFmpeg Filter Graph:
-        # 1. Create black background canvas of specific size
-        # 2. Scale the input video by the zoom factor
-        # 3. Overlay the scaled video onto the black background at X,Y pan coordinates
-        filter_complex = f"color=c=black:s={w_out}x{h_out} [bg]; [0:v] scale={w_s}:{h_s} [vid]; [bg][vid] overlay={x_f}:{y_f}:shortest=1"
+        # 1. Create Black Canvas
+        # 2. Scale Video
+        # 3. Overlay Video onto Canvas at exact X/Y coordinates dragged by the user
+        filter_complex = f"color=c=black:s={w_out}x{h_out} [bg]; [0:v] scale={s_w}:{s_h} [vid]; [bg][vid] overlay={x_offset}:{y_offset}:shortest=1"
         
         cmd = [
             "ffmpeg", "-y",
@@ -95,9 +161,8 @@ def process_video(input_path, output_path, start_t, end_t, layout_data=None):
             "-filter_complex", filter_complex,
             "-c:v", "libx264",
             "-crf", "17",        # Visually Lossless
-            "-preset", "slow",   # Best compression/quality ratio
-            "-c:a", "aac",
-            "-b:a", "192k",
+            "-preset", "slow",   # Deep analysis to retain high quality
+            "-c:a", "copy",      # Copy audio losslessly to save time
             output_path
         ]
 
@@ -120,89 +185,68 @@ if uploaded_file:
         f.write(uploaded_file.read())
 
     orig_w, orig_h, fps, duration = get_video_info(input_path)
-    st.success(f"Loaded! Resolution: {orig_w}x{orig_h} | Duration: {duration:.2f}s")
+    st.success(f"Original Resolution: {orig_w}x{orig_h} | Duration: {duration:.2f}s")
 
-    # --- TRIM CONTROLS ---
+    # --- 1. TRIM ---
     st.markdown("### 1. Trim Video")
-    start_t, end_t = st.slider("Select Start and End Time (Seconds)", 
-                               0.0, duration, (0.0, duration), step=0.1)
+    start_t, end_t = st.slider("Select Start and End Time (Seconds)", 0.0, duration, (0.0, duration), step=0.1)
 
-    # --- LAYOUT & ZOOM/PAN CONTROLS ---
-    st.markdown("### 2. Layout, Zoom & Pan")
-    enable_layout = st.checkbox("Enable Layout Edits (Zoom/Pan/Aspect Ratio)", value=False)
+    # --- 2. LAYOUT / ZOOM / PAN ---
+    st.markdown("### 2. Layout & Framing")
+    enable_layout = st.checkbox("Enable Layout Edit (Drag & Zoom)", value=False)
     
-    layout_data = None
-    
+    js_data = None
+    target_w, target_h = orig_w, orig_h
+
     if enable_layout:
-        col_ui, col_preview = st.columns([1, 1.5])
+        col1, col2 = st.columns([1, 2])
         
-        with col_ui:
-            # 1. Canvas Resolution
-            aspect_choice = st.selectbox("Target Layout (Canvas Size)", [
-                "9:16 (Shorts/Reels/TikTok) - 1080x1920",
+        with col1:
+            aspect_choice = st.selectbox("Select Target Layout", [
+                "9:16 (Shorts/Reels) - 1080x1920",
                 "16:9 (YouTube) - 1920x1080",
                 "1:1 (Square) - 1080x1080",
-                "Keep Original Dimensions"
+                "Custom Dimensions"
             ])
             
             if "9:16" in aspect_choice:
-                w_out, h_out = 1080, 1920
+                target_w, target_h = 1080, 1920
             elif "16:9" in aspect_choice:
-                w_out, h_out = 1920, 1080
+                target_w, target_h = 1920, 1080
             elif "1:1" in aspect_choice:
-                w_out, h_out = 1080, 1080
+                target_w, target_h = 1080, 1080
             else:
-                w_out, h_out = orig_w, orig_h
-
-            # Calculate a "Fill" zoom default so the video covers the whole canvas initially
-            fill_zoom = max(w_out / orig_w, h_out / orig_h)
+                cust_w = st.number_input("Width", min_value=100, max_value=4000, value=1080)
+                cust_h = st.number_input("Height", min_value=100, max_value=4000, value=1920)
+                target_w, target_h = cust_w, cust_h
 
             st.markdown("---")
-            # 2. Zoom & Pan Sliders
-            zoom = st.slider("🔍 Zoom (Scale)", min_value=0.1, max_value=5.0, value=float(fill_zoom), step=0.05)
-            pan_x = st.slider("↔️ Pan Horizontal (%)", min_value=-100, max_value=100, value=0, step=1)
-            pan_y = st.slider("↕️ Pan Vertical (%)", min_value=-100, max_value=100, value=0, step=1)
-            
-            st.markdown("---")
-            preview_time = st.slider("Preview Frame Time", min_value=start_t, max_value=end_t, value=start_t, step=0.1)
-        
-        with col_preview:
-            frame_img = extract_frame(input_path, preview_time)
-            if frame_img:
-                # Generate live preview
-                preview_canvas, final_w_s, final_h_s, final_x, final_y = generate_preview(
-                    frame_img, w_out, h_out, zoom, pan_x, pan_y
-                )
-                
-                st.image(preview_canvas, caption=f"Live Preview ({w_out}x{h_out})", use_column_width=True)
-                
-                # Save math for FFmpeg
-                layout_data = {
-                    'w_out': w_out, 'h_out': h_out,
-                    'w_s': final_w_s, 'h_s': final_h_s,
-                    'x_final': final_x, 'y_final': final_y
-                }
+            preview_time = st.slider("Select Frame to align layout:", min_value=start_t, max_value=end_t, value=start_t, step=0.1)
+            st.info("👉 Use your Mouse (PC) or Finger (Mobile) to drag the image around. Drag the corners of the red box to Zoom.")
+
+        with col2:
+            b64_img = extract_frame_base64(input_path, preview_time)
+            if b64_img:
+                # The component returns a dict: {"scale": X, "left": Y, "top": Z}
+                js_data = st_interactive_canvas(b64_img, target_w, target_h, key=f"canvas_{target_w}_{target_h}_{preview_time}")
 
     # --- PROCESS ---
     st.markdown("---")
-    if st.button("🚀 Process Video", use_container_width=True, type="primary"):
-        with st.spinner("Processing in background..."):
+    if st.button("🚀 Process Final Video", use_container_width=True, type="primary"):
+        with st.spinner("Processing... ensuring zero quality drop."):
             
-            success = process_video(input_path, output_path, start_t, end_t, layout_data)
+            success = process_video(
+                input_path, output_path, start_t, end_t, 
+                layout_data=js_data if enable_layout else None,
+                orig_w=orig_w, orig_h=orig_h, target_w=target_w, target_h=target_h
+            )
 
             if success:
-                st.success("✅ Complete! Quality retained.")
+                st.success("✅ Complete!")
                 with open(output_path, "rb") as file:
                     video_bytes = file.read()
                     st.video(video_bytes)
-                    st.download_button(
-                        label="⬇️ Download Output Video",
-                        data=video_bytes,
-                        file_name=f"edited_{uploaded_file.name}",
-                        mime="video/mp4",
-                        use_container_width=True
-                    )
-                try:
-                    os.remove(output_path)
-                except:
-                    pass
+                    st.download_button("⬇️ Download Final Video", data=video_bytes, file_name=f"edited_{uploaded_file.name}", mime="video/mp4", use_container_width=True)
+                
+                try: os.remove(output_path)
+                except: pass
