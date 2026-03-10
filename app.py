@@ -94,9 +94,10 @@ def sync_state(key_from, key_to):
     st.session_state[key_to] = st.session_state[key_from]
 
 def render_synced_slider_number(label, min_v, max_v, default_v, step_v, base_key, is_int=False):
-    """Renders a slider with a perfectly synced manual number input next to it"""
+    """Renders a slider with a perfectly synced manual number input and a lock toggle next to it"""
     sl_key = f"{base_key}_sl"
     num_key = f"{base_key}_num"
+    lock_key = f"{base_key}_lock"
 
     if sl_key not in st.session_state: st.session_state[sl_key] = default_v
     if num_key not in st.session_state: st.session_state[num_key] = default_v
@@ -106,17 +107,24 @@ def render_synced_slider_number(label, min_v, max_v, default_v, step_v, base_key
     if st.session_state[sl_key] < min_v: st.session_state[sl_key] = min_v
     st.session_state[num_key] = st.session_state[sl_key]
 
-    col1, col2 = st.columns([4, 1])
+    # Check lock state
+    is_locked = st.session_state.get(lock_key, False)
+
+    col1, col2, col3 = st.columns([6, 2, 1.2]) # Added extra column for the lock toggle
     with col1:
-        st.slider(label, min_value=min_v, max_value=max_v, step=step_v, key=sl_key, on_change=sync_state, args=(sl_key, num_key))
+        st.slider(label, min_value=min_v, max_value=max_v, step=step_v, key=sl_key, on_change=sync_state, args=(sl_key, num_key), disabled=is_locked)
     with col2:
         # Align with slider
         st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
         if is_int:
-            st.number_input(label, min_value=int(min_v), max_value=int(max_v), step=int(step_v), key=num_key, on_change=sync_state, args=(num_key, sl_key), label_visibility="collapsed")
+            st.number_input(label, min_value=int(min_v), max_value=int(max_v), step=int(step_v), key=num_key, on_change=sync_state, args=(num_key, sl_key), label_visibility="collapsed", disabled=is_locked)
         else:
-            st.number_input(label, min_value=float(min_v), max_value=float(max_v), step=float(step_v), key=num_key, on_change=sync_state, args=(num_key, sl_key), label_visibility="collapsed")
-    
+            st.number_input(label, min_value=float(min_v), max_value=float(max_v), step=float(step_v), key=num_key, on_change=sync_state, args=(num_key, sl_key), label_visibility="collapsed", disabled=is_locked)
+    with col3:
+        # Align toggle with the manual number box
+        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+        st.toggle("🔒", key=lock_key)
+        
     return st.session_state[sl_key]
 
 # --- PREVIEW AND PROCESS ---
@@ -199,7 +207,9 @@ if uploaded_file:
             st.session_state.trim_st_num = format_time(st.session_state.trim_sl[0], duration)
             st.session_state.trim_end_num = format_time(st.session_state.trim_sl[1], duration)
 
-    st.slider("Select Range", 0.0, duration, step=0.1, key="trim_sl", on_change=sync_trim_slider)
+    is_trim_locked = st.session_state.get("trim_lock", False)
+
+    st.slider("Select Range", 0.0, duration, step=0.1, key="trim_sl", on_change=sync_trim_slider, disabled=is_trim_locked)
     
     # Determine which label format to show based on duration
     if duration >= 3600:
@@ -209,9 +219,13 @@ if uploaded_file:
     else:
         label_format = "SS.mmm"
 
-    t_col1, t_col2 = st.columns(2)
-    with t_col1: st.text_input(f"Start Time ({label_format})", key="trim_st_num", on_change=sync_trim_num)
-    with t_col2: st.text_input(f"End Time ({label_format})", key="trim_end_num", on_change=sync_trim_num)
+    # Split into 3 columns to append the lock toggle at the end
+    t_col1, t_col2, t_col3 = st.columns([3, 3, 1])
+    with t_col1: st.text_input(f"Start Time ({label_format})", key="trim_st_num", on_change=sync_trim_num, disabled=is_trim_locked)
+    with t_col2: st.text_input(f"End Time ({label_format})", key="trim_end_num", on_change=sync_trim_num, disabled=is_trim_locked)
+    with t_col3:
+        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+        st.toggle("🔒", key="trim_lock")
     
     start_t, end_t = st.session_state.trim_sl
 
@@ -250,7 +264,7 @@ if uploaded_file:
                 st.session_state.pany_num = 0
 
             st.markdown("---")
-            # Using our custom synchronized inputs
+            # Using our custom synchronized inputs WITH locks
             zoom = render_synced_slider_number("🔍 Zoom (Scale)", 0.1, 5.0, float(fill_zoom), 0.05, "zoom")
             pan_x = render_synced_slider_number("↔️ Pan Horizontal (%)", -100, 100, 0, 1, "panx", is_int=True)
             pan_y = render_synced_slider_number("↕️ Pan Vertical (%)", -100, 100, 0, 1, "pany", is_int=True)
@@ -299,4 +313,4 @@ if uploaded_file:
                 try:
                     os.remove(output_path)
                 except:
-                    pass 
+                    pass
