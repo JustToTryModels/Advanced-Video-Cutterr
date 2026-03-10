@@ -38,23 +38,53 @@ def make_even(val):
     val = int(val)
     return val if val % 2 == 0 else val + 1
 
-# --- TIME FORMATTING HELPERS ---
-def sec_to_hhmmss(seconds):
+# --- DYNAMIC TIME FORMATTING HELPERS ---
+def format_time(seconds, total_duration):
+    """Dynamically formats time based on the video's total duration"""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
-    ms = int((seconds - int(seconds)) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+    ms = int(round((seconds - int(seconds)) * 1000))
+    
+    # Handle rounding overflow
+    if ms == 1000:
+        s += 1
+        ms = 0
+        if s == 60:
+            m += 1
+            s = 0
+            if m == 60:
+                h += 1
+                m = 0
 
-def hhmmss_to_sec(time_str):
+    if total_duration >= 3600:
+        return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+    elif total_duration >= 60:
+        return f"{m:02d}:{s:02d}.{ms:03d}"
+    else:
+        return f"{s:02d}.{ms:03d}"
+
+def parse_time(time_str):
+    """Parses time strings regardless of whether they are SS.mmm, MM:SS.mmm, or HH:MM:SS.mmm"""
     try:
         parts = time_str.split(':')
-        h = int(parts[0])
-        m = int(parts[1])
-        s_parts = parts[2].split('.')
-        s = int(s_parts[0])
-        ms = int(s_parts[1]) if len(s_parts) > 1 else 0
-        return h * 3600 + m * 60 + s + ms / 1000.0
+        seconds = 0
+        
+        # Parse Seconds & Milliseconds (Always the last part)
+        s_parts = parts[-1].split('.')
+        seconds += int(s_parts[0])
+        if len(s_parts) > 1:
+            seconds += int(s_parts[1]) / 1000.0
+            
+        # Parse Minutes if present
+        if len(parts) >= 2:
+            seconds += int(parts[-2]) * 60
+            
+        # Parse Hours if present
+        if len(parts) >= 3:
+            seconds += int(parts[-3]) * 3600
+            
+        return seconds
     except:
         return -1 # Invalid format
 
@@ -149,31 +179,39 @@ if uploaded_file:
     # --- TRIM CONTROLS ---
     st.markdown("### 1. Trim Video")
     
-    # Initialize Trim State
+    # Initialize Trim State dynamically based on duration
     if "trim_sl" not in st.session_state:
         st.session_state.trim_sl = (0.0, duration)
-        st.session_state.trim_st_num = sec_to_hhmmss(0.0)
-        st.session_state.trim_end_num = sec_to_hhmmss(duration)
+        st.session_state.trim_st_num = format_time(0.0, duration)
+        st.session_state.trim_end_num = format_time(duration, duration)
 
     def sync_trim_slider():
-        st.session_state.trim_st_num = sec_to_hhmmss(st.session_state.trim_sl[0])
-        st.session_state.trim_end_num = sec_to_hhmmss(st.session_state.trim_sl[1])
+        st.session_state.trim_st_num = format_time(st.session_state.trim_sl[0], duration)
+        st.session_state.trim_end_num = format_time(st.session_state.trim_sl[1], duration)
         
     def sync_trim_num():
-        st_sec = hhmmss_to_sec(st.session_state.trim_st_num)
-        end_sec = hhmmss_to_sec(st.session_state.trim_end_num)
+        st_sec = parse_time(st.session_state.trim_st_num)
+        end_sec = parse_time(st.session_state.trim_end_num)
         # Validate input
         if st_sec != -1 and end_sec != -1 and 0 <= st_sec < end_sec <= duration:
             st.session_state.trim_sl = (st_sec, end_sec)
-        else: # Revert to valid if user types nonsense
-            st.session_state.trim_st_num = sec_to_hhmmss(st.session_state.trim_sl[0])
-            st.session_state.trim_end_num = sec_to_hhmmss(st.session_state.trim_sl[1])
+        else: # Revert to valid if user types nonsense or out of bounds
+            st.session_state.trim_st_num = format_time(st.session_state.trim_sl[0], duration)
+            st.session_state.trim_end_num = format_time(st.session_state.trim_sl[1], duration)
 
     st.slider("Select Range", 0.0, duration, step=0.1, key="trim_sl", on_change=sync_trim_slider)
     
+    # Determine which label format to show based on duration
+    if duration >= 3600:
+        label_format = "HH:MM:SS.mmm"
+    elif duration >= 60:
+        label_format = "MM:SS.mmm"
+    else:
+        label_format = "SS.mmm"
+
     t_col1, t_col2 = st.columns(2)
-    with t_col1: st.text_input("Start Time (HH:MM:SS.mmm)", key="trim_st_num", on_change=sync_trim_num)
-    with t_col2: st.text_input("End Time (HH:MM:SS.mmm)", key="trim_end_num", on_change=sync_trim_num)
+    with t_col1: st.text_input(f"Start Time ({label_format})", key="trim_st_num", on_change=sync_trim_num)
+    with t_col2: st.text_input(f"End Time ({label_format})", key="trim_end_num", on_change=sync_trim_num)
     
     start_t, end_t = st.session_state.trim_sl
 
