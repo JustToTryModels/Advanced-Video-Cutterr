@@ -46,7 +46,6 @@ def format_time(seconds, total_duration):
     s = int(seconds % 60)
     ms = int(round((seconds - int(seconds)) * 1000))
     
-    # Handle rounding overflow
     if ms == 1000:
         s += 1
         ms = 0
@@ -65,57 +64,43 @@ def format_time(seconds, total_duration):
         return f"{s:02d}.{ms:03d}"
 
 def parse_time(time_str):
-    """Parses time strings regardless of whether they are SS.mmm, MM:SS.mmm, or HH:MM:SS.mmm"""
     try:
         parts = time_str.split(':')
         seconds = 0
-        
-        # Parse Seconds & Milliseconds (Always the last part)
         s_parts = parts[-1].split('.')
         seconds += int(s_parts[0])
-        if len(s_parts) > 1:
-            seconds += int(s_parts[1]) / 1000.0
-            
-        # Parse Minutes if present
-        if len(parts) >= 2:
-            seconds += int(parts[-2]) * 60
-            
-        # Parse Hours if present
-        if len(parts) >= 3:
-            seconds += int(parts[-3]) * 3600
-            
+        if len(s_parts) > 1: seconds += int(s_parts[1]) / 1000.0
+        if len(parts) >= 2: seconds += int(parts[-2]) * 60
+        if len(parts) >= 3: seconds += int(parts[-3]) * 3600
         return seconds
     except:
-        return -1 # Invalid format
+        return -1 
 
 # --- UI SYNC HELPERS ---
 def sync_state(key_from, key_to):
-    """Synchronizes slider and number input states"""
     st.session_state[key_to] = st.session_state[key_from]
 
-def render_synced_slider_number(label, min_v, max_v, default_v, step_v, base_key, is_int=False):
-    """Renders a slider with a perfectly synced manual number input next to it"""
+def render_synced_slider_number(label, min_v, max_v, default_v, step_v, base_key, is_int=False, disabled=False):
+    """Renders a slider with a synced manual number input. Now accepts a disabled state."""
     sl_key = f"{base_key}_sl"
     num_key = f"{base_key}_num"
 
     if sl_key not in st.session_state: st.session_state[sl_key] = default_v
     if num_key not in st.session_state: st.session_state[num_key] = default_v
 
-    # Clamp bounds dynamically
     if st.session_state[sl_key] > max_v: st.session_state[sl_key] = max_v
     if st.session_state[sl_key] < min_v: st.session_state[sl_key] = min_v
     st.session_state[num_key] = st.session_state[sl_key]
 
     col1, col2 = st.columns([4, 1])
     with col1:
-        st.slider(label, min_value=min_v, max_value=max_v, step=step_v, key=sl_key, on_change=sync_state, args=(sl_key, num_key))
+        st.slider(label, min_value=min_v, max_value=max_v, step=step_v, key=sl_key, on_change=sync_state, args=(sl_key, num_key), disabled=disabled)
     with col2:
-        # Align with slider
         st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
         if is_int:
-            st.number_input(label, min_value=int(min_v), max_value=int(max_v), step=int(step_v), key=num_key, on_change=sync_state, args=(num_key, sl_key), label_visibility="collapsed")
+            st.number_input(label, min_value=int(min_v), max_value=int(max_v), step=int(step_v), key=num_key, on_change=sync_state, args=(num_key, sl_key), label_visibility="collapsed", disabled=disabled)
         else:
-            st.number_input(label, min_value=float(min_v), max_value=float(max_v), step=float(step_v), key=num_key, on_change=sync_state, args=(num_key, sl_key), label_visibility="collapsed")
+            st.number_input(label, min_value=float(min_v), max_value=float(max_v), step=float(step_v), key=num_key, on_change=sync_state, args=(num_key, sl_key), label_visibility="collapsed", disabled=disabled)
     
     return st.session_state[sl_key]
 
@@ -161,7 +146,6 @@ def process_video(input_path, output_path, start_t, end_t, layout_data=None):
 uploaded_file = st.file_uploader("Upload Video (MP4, MOV, MKV)", type=["mp4", "mov", "mkv"])
 
 if uploaded_file:
-    # Reset Session State entirely if a NEW video is uploaded to prevent caching errors
     if "last_filename" not in st.session_state or st.session_state.last_filename != uploaded_file.name:
         st.session_state.clear()
         st.session_state.last_filename = uploaded_file.name
@@ -174,12 +158,18 @@ if uploaded_file:
         f.write(uploaded_file.read())
 
     orig_w, orig_h, fps, duration = get_video_info(input_path)
-    st.success(f"Loaded! Resolution: {orig_w}x{orig_h} | Duration: {duration:.2f}s")
+    
+    col_info, col_lock = st.columns([2, 1])
+    with col_info:
+        st.success(f"Loaded! Resolution: {orig_w}x{orig_h} | Duration: {duration:.2f}s")
+    with col_lock:
+        # MOBILE FIX: Toggle to lock controls so scrolling is safe
+        st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+        ui_locked = st.toggle("🔒 Lock Controls (Safe Mobile Scrolling)", value=False)
 
     # --- TRIM CONTROLS ---
     st.markdown("### 1. Trim Video")
     
-    # Initialize Trim State dynamically based on duration
     if "trim_sl" not in st.session_state:
         st.session_state.trim_sl = (0.0, duration)
         st.session_state.trim_st_num = format_time(0.0, duration)
@@ -192,32 +182,27 @@ if uploaded_file:
     def sync_trim_num():
         st_sec = parse_time(st.session_state.trim_st_num)
         end_sec = parse_time(st.session_state.trim_end_num)
-        # Validate input
         if st_sec != -1 and end_sec != -1 and 0 <= st_sec < end_sec <= duration:
             st.session_state.trim_sl = (st_sec, end_sec)
-        else: # Revert to valid if user types nonsense or out of bounds
+        else:
             st.session_state.trim_st_num = format_time(st.session_state.trim_sl[0], duration)
             st.session_state.trim_end_num = format_time(st.session_state.trim_sl[1], duration)
 
-    st.slider("Select Range", 0.0, duration, step=0.1, key="trim_sl", on_change=sync_trim_slider)
+    st.slider("Select Range", 0.0, duration, step=0.1, key="trim_sl", on_change=sync_trim_slider, disabled=ui_locked)
     
-    # Determine which label format to show based on duration
-    if duration >= 3600:
-        label_format = "HH:MM:SS.mmm"
-    elif duration >= 60:
-        label_format = "MM:SS.mmm"
-    else:
-        label_format = "SS.mmm"
+    if duration >= 3600: label_format = "HH:MM:SS.mmm"
+    elif duration >= 60: label_format = "MM:SS.mmm"
+    else: label_format = "SS.mmm"
 
     t_col1, t_col2 = st.columns(2)
-    with t_col1: st.text_input(f"Start Time ({label_format})", key="trim_st_num", on_change=sync_trim_num)
-    with t_col2: st.text_input(f"End Time ({label_format})", key="trim_end_num", on_change=sync_trim_num)
+    with t_col1: st.text_input(f"Start Time ({label_format})", key="trim_st_num", on_change=sync_trim_num, disabled=ui_locked)
+    with t_col2: st.text_input(f"End Time ({label_format})", key="trim_end_num", on_change=sync_trim_num, disabled=ui_locked)
     
     start_t, end_t = st.session_state.trim_sl
 
     # --- LAYOUT & ZOOM/PAN CONTROLS ---
     st.markdown("### 2. Layout, Zoom & Pan")
-    enable_layout = st.checkbox("Enable Layout Edits (Zoom/Pan/Aspect Ratio)", value=False)
+    enable_layout = st.checkbox("Enable Layout Edits (Zoom/Pan/Aspect Ratio)", value=False, disabled=ui_locked)
     
     layout_data = None
     
@@ -230,7 +215,7 @@ if uploaded_file:
                 "16:9 (YouTube) - 1920x1080",
                 "1:1 (Square) - 1080x1080",
                 "Keep Original Dimensions"
-            ])
+            ], disabled=ui_locked)
             
             if "9:16" in aspect_choice: w_out, h_out = 1080, 1920
             elif "16:9" in aspect_choice: w_out, h_out = 1920, 1080
@@ -239,7 +224,6 @@ if uploaded_file:
 
             fill_zoom = max(w_out / orig_w, h_out / orig_h)
             
-            # Reset Zoom/Pan if layout changes
             if "last_aspect" not in st.session_state or st.session_state.last_aspect != aspect_choice:
                 st.session_state.last_aspect = aspect_choice
                 st.session_state.zoom_sl = float(fill_zoom)
@@ -250,13 +234,12 @@ if uploaded_file:
                 st.session_state.pany_num = 0
 
             st.markdown("---")
-            # Using our custom synchronized inputs
-            zoom = render_synced_slider_number("🔍 Zoom (Scale)", 0.1, 5.0, float(fill_zoom), 0.05, "zoom")
-            pan_x = render_synced_slider_number("↔️ Pan Horizontal (%)", -100, 100, 0, 1, "panx", is_int=True)
-            pan_y = render_synced_slider_number("↕️ Pan Vertical (%)", -100, 100, 0, 1, "pany", is_int=True)
+            zoom = render_synced_slider_number("🔍 Zoom (Scale)", 0.1, 5.0, float(fill_zoom), 0.05, "zoom", disabled=ui_locked)
+            pan_x = render_synced_slider_number("↔️ Pan Horizontal (%)", -100, 100, 0, 1, "panx", is_int=True, disabled=ui_locked)
+            pan_y = render_synced_slider_number("↕️ Pan Vertical (%)", -100, 100, 0, 1, "pany", is_int=True, disabled=ui_locked)
             
             st.markdown("---")
-            preview_time = render_synced_slider_number("Preview Frame Time", start_t, end_t, start_t, 0.1, "prev")
+            preview_time = render_synced_slider_number("Preview Frame Time", start_t, end_t, start_t, 0.1, "prev", disabled=ui_locked)
         
         with col_preview:
             frame_img = extract_frame(input_path, preview_time)
