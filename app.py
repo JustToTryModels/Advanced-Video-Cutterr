@@ -14,6 +14,10 @@ Create perfect 9:16 Shorts or 16:9 Landscape videos.
 * **Layout/Zoom/Pan:** Re-encoded with visually lossless quality (CRF 17).
 """)
 
+# Initialize session state for preview
+if 'preview_video' not in st.session_state:
+    st.session_state['preview_video'] = None
+
 # --- HELPER FUNCTIONS ---
 def get_video_info(video_path):
     cap = cv2.VideoCapture(video_path)
@@ -64,6 +68,52 @@ def generate_preview(frame_img, w_out, h_out, zoom, pan_x_pct, pan_y_pct):
     
     return canvas, w_s, h_s, x_final, y_final
 
+def generate_preview_video(input_path, output_path, start_t, end_t, layout_data=None, max_duration=10):
+    """Generate a quick preview video (lower quality for speed)"""
+    # Limit preview duration
+    preview_end = min(start_t + max_duration, end_t)
+    
+    if layout_data is None:
+        cmd = [
+            "ffmpeg", "-y", 
+            "-ss", str(start_t), 
+            "-to", str(preview_end), 
+            "-i", input_path,
+            "-c:v", "libx264",
+            "-crf", "28",           # Lower quality for faster preview
+            "-preset", "ultrafast", # Fastest encoding
+            "-c:a", "aac",
+            "-b:a", "128k",
+            output_path
+        ]
+    else:
+        w_out, h_out = make_even(layout_data['w_out']), make_even(layout_data['h_out'])
+        w_s, h_s = make_even(layout_data['w_s']), make_even(layout_data['h_s'])
+        x_f, y_f = layout_data['x_final'], layout_data['y_final']
+        
+        filter_complex = f"color=c=black:s={w_out}x{h_out} [bg]; [0:v] scale={w_s}:{h_s} [vid]; [bg][vid] overlay={x_f}:{y_f}:shortest=1"
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(start_t),
+            "-to", str(preview_end),
+            "-i", input_path,
+            "-filter_complex", filter_complex,
+            "-c:v", "libx264",
+            "-crf", "28",           # Lower quality for faster preview
+            "-preset", "ultrafast", # Fastest encoding
+            "-c:a", "aac",
+            "-b:a", "128k",
+            output_path
+        ]
+
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except subprocess.CalledProcessError as e:
+        st.error(f"FFmpeg Error: {e.stderr.decode('utf-8')}")
+        return False
+
 def process_video(input_path, output_path, start_t, end_t, layout_data=None):
     if layout_data is None:
         st.info("No Layout applied. Performing Lossless Trim...")
@@ -96,7 +146,6 @@ def process_video(input_path, output_path, start_t, end_t, layout_data=None):
             "-c:v", "libx264",
             "-crf", "17",        # Visually Lossless
             "-preset", "slow",   # Best compression/quality ratio
-            "-pix_fmt", "yuv420p", # Ensures the video plays correctly in Streamlit/Web Browsers
             "-c:a", "aac",
             "-b:a", "192k",
             output_path
@@ -116,6 +165,7 @@ if uploaded_file:
     temp_dir = tempfile.gettempdir()
     input_path = os.path.join(temp_dir, f"in_{uploaded_file.name}")
     output_path = os.path.join(temp_dir, f"out_{uploaded_file.name}")
+    preview_video_path = os.path.join(temp_dir, f"preview_{uploaded_file.name}")
     
     with open(input_path, "wb") as f:
         f.write(uploaded_file.read())
@@ -175,7 +225,7 @@ if uploaded_file:
                     frame_img, w_out, h_out, zoom, pan_x, pan_y
                 )
                 
-                st.image(preview_canvas, caption=f"Live Preview ({w_out}x{h_out})", use_column_width=True)
+                st.image(preview_canvas, caption=f"Live Frame Preview ({w_out}x{h_out})", use_column_width=True)
                 
                 # Save math for FFmpeg
                 layout_data = {
@@ -184,26 +234,62 @@ if uploaded_file:
                     'x_final': final_x, 'y_final': final_y
                 }
 
-    # --- PROCESS ---
+    # --- VIDEO PREVIEW SECTION ---
     st.markdown("---")
-    if st.button("🚀 Process Video", use_container_width=True, type="primary"):
-        with st.spinner("Processing in background..."):
+    st.markdown("### 3. Preview Video")
+    st.markdown("Generate a quick preview video to see how your trimmed/edited video looks in motion before final processing.")
+    
+    col_prev1, col_prev2 = st.columns([1, 2])
+    
+    with col_prev1:
+        # Calculate max preview duration based on trim selection
+        max_preview_dur = min(30, int(end_t - start_t)) if end_t > start_t else 1
+        preview_duration = st.slider(
+            "Preview Duration (seconds)", 
+            min_value=1, 
+            max_value=max(1, max_preview_dur), 
+            value=min(10, max(1, max_preview_dur)), 
+            step=1,
+            help="Length of preview video to generate"
+        )
+        
+        if st.button("🎥 Generate Preview", use_container_width=True):
+            with st.spinner("Generating preview video (fast encoding)..."):
+                success = generate_preview_video(
+                    input_path, preview_video_path, 
+                    start_t, end_t, layout_data, preview_duration
+                )
+                if success:
+                    with open(preview_video_path, "rb") as f:
+                        st.session_state['preview_video'] = f.read()
+                    st.success("Preview generated!")
+                    # Clean up temp preview file
+                    try:
+                        os.remove(preview_video_path)
+                    except:
+                        pass
+    
+    with col_prev2:
+        # Display preview video if available
+        if st.session_state['preview_video'] is not None:
+            st.video(st.session_state['preview_video'])
+            st.caption(f"📹 Preview: First {preview_duration} seconds (lower quality for speed)")
+        else:
+            st.info("👆 Click 'Generate Preview' to see how your video will look")
+
+    # --- PROCESS & DOWNLOAD ---
+    st.markdown("---")
+    st.markdown("### 4. Process & Download")
+    if st.button("🚀 Process Full Video (High Quality)", use_container_width=True, type="primary"):
+        with st.spinner("Processing full video with high quality settings..."):
             
             success = process_video(input_path, output_path, start_t, end_t, layout_data)
 
             if success:
                 st.success("✅ Complete! Quality retained.")
-                
-                # --- PREVIEW SECTION ADDED HERE ---
-                st.markdown("### 🎬 Preview Final Video")
-                st.info("Watch your trimmed and zoomed video below before downloading.")
-                
                 with open(output_path, "rb") as file:
                     video_bytes = file.read()
-                    
-                    st.video(video_bytes) # Displays the video right in the browser
-                    
-                    st.markdown("---")
+                    st.video(video_bytes)
                     st.download_button(
                         label="⬇️ Download Output Video",
                         data=video_bytes,
